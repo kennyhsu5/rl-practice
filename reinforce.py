@@ -183,11 +183,11 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument("--env", type=str, default="InvertedDoublePendulum-v2")
     parser.add_argument("--random", type=bool, default=False)
+    parser.add_argument("--search_count", type=int, default=100)
     args = parser.parse_args()
 
     algo = "reinforce"
     epochs = 10000
-    search_per_env = 100
 
     seeds=[0, 1, 2, 3, 4, 5]
     gammas = [0.99, 0.999, 1]
@@ -199,7 +199,7 @@ if __name__ == '__main__':
     print("Environment: {}".format(args.env))
     print("Algotirhm: {}\n".format(algo))
 
-    for s in range(search_per_env):
+    for s in range(args.search_count):
         tf.reset_default_graph()
         seed = random.choice(seeds)
         gamma = random.choice(gammas)
