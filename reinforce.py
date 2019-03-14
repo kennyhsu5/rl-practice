@@ -3,6 +3,7 @@ import tensorflow as tf
 import gym
 import os
 import random
+import time
 import shutil
 from gym import wrappers
 from gym.spaces import Discrete, Box
@@ -75,11 +76,12 @@ def get_loss_fn(out, a_ph, adv, action_space):
 def reinforce(env_fn, actor_critic=mlp_ac, ac_kwargs=dict(), dir="", epochs=1000,
               episodes_per_epoch=100, max_ep_len=150, seed=0, gamma=0.999, random=False,
               pi_lr=0.0003, v_lr=0.0003):
-
     if os.path.isdir(dir):
         shutil.rmtree(dir)
     os.makedirs(dir)
     file = open("{}/train.txt".format(dir), "w+")
+
+    start = time.time()
 
     tf.set_random_seed(seed)
     np.random.seed(seed)
@@ -157,11 +159,16 @@ def reinforce(env_fn, actor_critic=mlp_ac, ac_kwargs=dict(), dir="", epochs=1000
         file.write("  Std Reward: {}\n".format(np.std(np.array(ep_rs))))
         file.write("  Avg Episode Len: {}\n".format(size / episodes_per_epoch))
 
+        if np.std(np.array(ep_rs)) == 0:
+            break
+
         # Update/train model
         v_val = sess.run(v, feed_dict={x_ph: xs})
         _, _, summary = sess.run([train_pi, train_v, merge], feed_dict={x_ph: xs, a_ph: acts, r_ph: rs, v_ph: v_val})
         train_writer.add_summary(summary, epoch)
     train_writer.close()
+
+    file.write("\nTraining time: {}".format(time.time() - start))
 
     file.write("\n\nTesting...\n")
     print("  Tests:")
@@ -187,14 +194,14 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     algo = "reinforce"
-    epochs = 10000
+    total_episodes = 1000000
 
-    seeds=[0, 1, 2, 3, 4, 5]
+    seeds=[0, 1, 2]
     gammas = [0.99, 0.999, 1]
-    episodes_per_epochs = [25, 50, 100, 250]
-    max_ep_lens = [150, 500]
+    episodes_per_epochs = [25, 50]
+    max_ep_lens = [150]
     lrs = [0.001, 0.0003, 0.00001]
-    hidden_sizes = [[32, 32], [64, 32], [64, 64], [128, 64]]
+    hidden_sizes = [[32, 32], [64, 32], [64, 64]]
 
     print("Environment: {}".format(args.env))
     print("Algotirhm: {}\n".format(algo))
@@ -207,11 +214,13 @@ if __name__ == '__main__':
         max_ep_len = random.choice(max_ep_lens)
         lr = random.choice(lrs)
         hidden_size = random.choice(hidden_sizes)
+        epochs = int(total_episodes / episodes_per_epoch)
 
         dir = "/tmp/tf_logs/{}/{}/{}".format(algo, args.env, hyp_hash(hidden_size, seed, gamma, episodes_per_epoch, max_ep_len, args.random, lr, lr))
 
         print("Search {}: ".format(s))
         print("  seed: {}".format(seed))
+        print("  epoch: {}".format(epochs))
         print("  gamma: {}".format(gamma))
         print("  episodes_per_epoch: {}".format(episodes_per_epoch))
         print("  max_ep_len: {}".format(max_ep_len))
