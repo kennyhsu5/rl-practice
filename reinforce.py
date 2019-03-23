@@ -34,27 +34,28 @@ def placeholder(space, name=None):
 
 def mlp(x, hidden_sizes=(32,), activation=tf.nn.relu, output=None):
     for h in hidden_sizes[:-1]:
-        x = tf.layers.dense(x, h, activation=activation)
-    return tf.layers.dense(x, hidden_sizes[-1], activation=output)
+        x = tf.layers.dense(x, h, kernel_initializer=tf.contrib.layers.variance_scaling_initializer(), activation=activation)
+    return tf.layers.dense(x, hidden_sizes[-1], kernel_initializer=tf.contrib.layers.variance_scaling_initializer(),  activation=output)
 
 def gaussian_likelihood(x, mu, log_std):
     s = -0.5 * (((x-mu)/(tf.exp(log_std)+EPS))**2 + 2*log_std + np.log(2*np.pi))
     return tf.reduce_sum(s, axis=1)
 
 def mlp_gaussian(x, a, action_space, hidden_sizes=(32,), activation=tf.nn.relu, output=None):
-    act_dim = a.shape.as_list()[-1]
     act_dim = action_space.shape[0]
     mu = tf.squeeze(mlp(x, list(hidden_sizes)+[act_dim], activation, output))
     log_std = tf.get_variable(name="log_std", initializer=-0.5*np.ones(act_dim, dtype=np.float32))
-    std = tf.exp(log_std)
-    pi = mu + tf.random_normal(tf.shape(mu)) * std
-    return pi, mu
+    pi = mu + tf.random_normal(tf.shape(mu)) * tf.exp(log_std)
+    log_liklihood = gaussian_likelihood(a, mu, log_std)
+    return pi, log_liklihood
 
 def mlp_categorical(x, a, action_space, hidden_sizes=(32,), activation=tf.nn.relu, output=None):
     act_dim = action_space.n
     logits = mlp(x, list(hidden_sizes)+[act_dim], activation, None)
-    pi = tf.nn.softmax(logits)
-    return pi, logits
+    dist = tf.contrib.distributions.Categorical(logits=logits)
+    pi = dist.sample(1)
+    log_liklihood = tf.math.log(tf.nn.softmax(logits))
+    return pi, log_liklihood
 
 def mlp_ac(x, a, action_space, hidden_sizes=(128, 64), activation=tf.nn.relu, output=None):
     policy = mlp_gaussian
@@ -62,16 +63,10 @@ def mlp_ac(x, a, action_space, hidden_sizes=(128, 64), activation=tf.nn.relu, ou
         policy = mlp_categorical
 
     with tf.variable_scope("pi"):
-        pi, o = policy(x, a, action_space, hidden_sizes, activation, output)
+        pi, log_liklihood = policy(x, a, action_space, hidden_sizes, activation, output)
     with tf.variable_scope("b"):
         v = tf.squeeze(mlp(x, list(hidden_sizes) + [1], activation, None), axis=1)
-    return pi, o, v
-
-def get_loss_fn(out, a_ph, adv, action_space):
-    if isinstance(action_space, Discrete):
-        neg_log_prob = tf.nn.sparse_softmax_cross_entropy_with_logits(logits=out, labels=a_ph)
-        return tf.reduce_mean(neg_log_prob * adv)
-    return tf.losses.mean_squared_error(a_ph, out, weights=tf.expand_dims(adv, 1))
+    return pi, log_liklihood, v
 
 def reinforce(env_fn, actor_critic=mlp_ac, ac_kwargs=dict(), dir="", epochs=1000,
               episodes_per_epoch=100, max_ep_len=150, seed=0, gamma=0.999, random=False,
@@ -91,10 +86,10 @@ def reinforce(env_fn, actor_critic=mlp_ac, ac_kwargs=dict(), dir="", epochs=1000
     file.write("Environment is {}\n".format(action_type))
 
     x_ph, a_ph, v_ph, r_ph = placeholder(env.observation_space, "input"), placeholder(env.action_space, "action"), placeholder(None, name="baseline"), placeholder(None, name="reward")
-    pi, out, v = mlp_ac(x_ph, a_ph, env.action_space, **ac_kwargs)
+    pi, log_liklihood, v = mlp_ac(x_ph, a_ph, env.action_space, **ac_kwargs)
 
     adv = r_ph - v_ph
-    loss = get_loss_fn(out, a_ph, adv, env.action_space)
+    loss = tf.reduce_mean(log_liklihood * tf.expand_dims(adv, 1))
     v_loss = tf.losses.mean_squared_error(r_ph, v)
     tf.summary.scalar("loss", loss)
     tf.summary.scalar("v_loss", v_loss)
@@ -115,7 +110,7 @@ def reinforce(env_fn, actor_critic=mlp_ac, ac_kwargs=dict(), dir="", epochs=1000
             return action_space.sample()
         a = sess.run(pi, feed_dict={x_ph: o.reshape(1,-1)})
         if isinstance(env.action_space, Discrete):
-            return np.argmax(a)
+            return a[0][0]
         return np.clip(a, action_space.low, action_space.high)
 
     for epoch in range(epochs):
@@ -159,9 +154,6 @@ def reinforce(env_fn, actor_critic=mlp_ac, ac_kwargs=dict(), dir="", epochs=1000
         file.write("  Std Reward: {}\n".format(np.std(np.array(ep_rs))))
         file.write("  Avg Episode Len: {}\n".format(size / episodes_per_epoch))
 
-        if np.std(np.array(ep_rs)) == 0:
-            break
-
         # Update/train model
         v_val = sess.run(v, feed_dict={x_ph: xs})
         _, _, summary = sess.run([train_pi, train_v, merge], feed_dict={x_ph: xs, a_ph: acts, r_ph: rs, v_ph: v_val})
@@ -190,33 +182,28 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument("--env", type=str, default="InvertedDoublePendulum-v2")
     parser.add_argument("--random", type=bool, default=False)
-    parser.add_argument("--search_count", type=int, default=100)
+    parser.add_argument("--search_count", type=int, default=50)
     args = parser.parse_args()
 
     algo = "reinforce"
-    total_episodes = 1000000
+    total_episodes = 50000
 
-    seeds=[0, 1, 2]
-    gammas = [0.99, 0.999, 1]
-    episodes_per_epochs = [25, 50]
-    max_ep_lens = [150]
-    lrs = [0.001, 0.0003, 0.00001]
-    hidden_sizes = [[32, 32], [64, 32], [64, 64]]
+    hidden_sizes = [[32, 32], [64, 32], [64, 64], [128, 64], [128, 128]]
 
     print("Environment: {}".format(args.env))
     print("Algotirhm: {}\n".format(algo))
 
     for s in range(args.search_count):
         tf.reset_default_graph()
-        seed = random.choice(seeds)
-        gamma = random.choice(gammas)
-        episodes_per_epoch = random.choice(episodes_per_epochs)
-        max_ep_len = random.choice(max_ep_lens)
-        lr = random.choice(lrs)
+        seed = random.randint(0, 1000)
+        gamma = np.random.uniform(0.99, 1,)
+        episodes_per_epoch = random.randrange(25, 100, 5)
+        max_ep_len = random.randrange(150, 250, 10)
+        lr = np.random.uniform(0.00001, 0.001)
         hidden_size = random.choice(hidden_sizes)
         epochs = int(total_episodes / episodes_per_epoch)
 
-        dir = "/tmp/tf_logs/{}/{}/{}".format(algo, args.env, hyp_hash(hidden_size, seed, gamma, episodes_per_epoch, max_ep_len, args.random, lr, lr))
+        dir = "tf_logs/{}/{}/{}".format(algo, args.env, hyp_hash(hidden_size, seed, gamma, episodes_per_epoch, max_ep_len, args.random, lr, lr))
 
         print("Search {}: ".format(s))
         print("  seed: {}".format(seed))
